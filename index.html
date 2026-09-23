@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Life OS</title>
+  <meta name="theme-color" content="#1f4e5f">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <style>
+    :root {
+      --bg: #f6f5f2; --card: #ffffff; --ink: #1d2327; --muted: #6b7378; --line: #e4e2dc;
+      --brand: #1f4e5f; --brand-ink: #ffffff; --accent: #e8a33d;
+      --due: #b3261e; --due-bg: #fbe9e7; --soon: #8a5a00; --soon-bg: #fdf1dc; --ok: #2e6b3f; --ok-bg: #e5f2e8;
+      --radius: 14px; --shadow: 0 1px 2px rgba(0,0,0,.05), 0 2px 8px rgba(0,0,0,.04);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121517; --card: #1b1f22; --ink: #e8eaeb; --muted: #9aa3a8; --line: #2b3135;
+        --brand: #5aa3b8; --brand-ink: #0d1517; --accent: #f0b456;
+        --due: #ff8a80; --due-bg: #3a1f1d; --soon: #f5c26b; --soon-bg: #3a2e17; --ok: #8fd19e; --ok-bg: #1d3223;
+        --shadow: none;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink);
+      font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    body { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+    header.top { position: sticky; top: 0; z-index: 5; background: var(--bg);
+      padding: calc(12px + env(safe-area-inset-top)) 16px 8px; display: flex; align-items: center; gap: 10px; }
+    header.top h1 { font-size: 22px; margin: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    main { padding: 4px 16px 24px; max-width: 720px; margin: 0 auto; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 14px; margin: 0 0 12px; }
+    .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+    .row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+    .row:first-of-type { border-top: 0; padding-top: 0; }
+    .row .grow { flex: 1; min-width: 0; }
+    .row .title { font-weight: 600; }
+    .row .sub { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+    .tap { cursor: pointer; }
+    .chip { font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+    .chip.due { color: var(--due); background: var(--due-bg); }
+    .chip.soon { color: var(--soon); background: var(--soon-bg); }
+    .chip.ok { color: var(--ok); background: var(--ok-bg); }
+    .chip.none { color: var(--muted); background: var(--line); }
+    button, .btn { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 10px 14px;
+      background: var(--brand); color: var(--brand-ink); cursor: pointer; text-decoration: none; display: inline-block; }
+    button.ghost, .btn.ghost { background: transparent; color: var(--brand); border: 1px solid var(--line); }
+    button.small { padding: 6px 10px; font-size: 14px; }
+    button.danger { background: transparent; color: var(--due); border: 1px solid var(--line); }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .big-num { font-size: 28px; font-weight: 700; }
+    .muted { color: var(--muted); }
+    .facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 15px; }
+    .facts dt { color: var(--muted); } .facts dd { margin: 0; overflow-wrap: anywhere; }
+    .note { white-space: pre-wrap; }
+    .empty { text-align: center; color: var(--muted); padding: 28px 8px; }
+    input, textarea, select { font: inherit; width: 100%; padding: 10px 12px; border-radius: 10px;
+      border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+    textarea { min-height: 90px; resize: vertical; }
+    label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+    nav.tabs { position: fixed; bottom: 0; left: 0; right: 0; z-index: 6; display: flex; background: var(--card);
+      border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
+    nav.tabs a { flex: 1; text-align: center; padding: 10px 0 12px; color: var(--muted); text-decoration: none;
+      font-size: 13px; font-weight: 600; }
+    nav.tabs a .ico { display: block; font-size: 20px; line-height: 1.2; }
+    nav.tabs a.on { color: var(--brand); }
+    .sheet-bg { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 20; display: flex; align-items: flex-end; justify-content: center; }
+    .sheet { background: var(--card); width: 100%; max-width: 720px; max-height: 90vh; overflow: auto;
+      border-radius: 18px 18px 0 0; padding: 16px 16px calc(20px + env(safe-area-inset-bottom)); }
+    .sheet h3 { margin: 0 0 4px; }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+    .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); background: var(--ink); color: var(--bg);
+      padding: 10px 16px; border-radius: 10px; z-index: 30; font-size: 14px; }
+    .login { max-width: 380px; margin: 12vh auto 0; padding: 0 16px; }
+    a { color: var(--brand); }
+  </style>
+</head>
+<body>
+  <div id="app"><p class="empty">Loading…</p></div>
+  <script type="module" src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  </script>
+</body>
+</html>
