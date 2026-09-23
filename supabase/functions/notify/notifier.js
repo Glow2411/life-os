@@ -26,13 +26,13 @@ const localDate = ts => new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).forma
 async function sendPush({ title, message, click = APP_URL, priority = 3, tags = [] }) {
   const topic = env('NTFY_TOPIC');
   if (!topic) throw new Error('NTFY_TOPIC secret not set');
-  const r = await fetch('https://ntfy.sh/', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic, title, message, click, priority, tags }),
-  });
-  if (!r.ok) throw new Error(`ntfy ${r.status}: ${await r.text()}`);
+  // Sent from Postgres (pg_net) via rpc, not fetch(): ntfy.sh rate-limits by IP and Edge Function IPs are shared
+  // with many other projects (→ 429). The database has its own IP. See lifeos_push() in schema-v3.
+  const { error } = await SB.rpc('lifeos_push', { payload: { topic, title, message, click, priority, tags } });
+  if (error) throw new Error(`lifeos_push: ${error.message}`);
 }
 let transport;
+let SB;   // service-role Supabase client, set per request
 async function sendEmail({ to, subject, html, text }) {
   if (!env('GMAIL_USER') || !env('GMAIL_APP_PASSWORD')) throw new Error('GMAIL_USER / GMAIL_APP_PASSWORD secrets not set');
   transport ||= nodemailer.createTransport({ host: 'smtp.gmail.com', port: 465, secure: true,
@@ -149,6 +149,7 @@ Deno.serve(async req => {
   let key = env('SUPABASE_SERVICE_ROLE_KEY') || env('SUPABASE_SECRET_KEY');
   if (!key && env('SUPABASE_SECRET_KEYS')) { try { key = Object.values(JSON.parse(env('SUPABASE_SECRET_KEYS')))[0]; } catch { /* ignore */ } }
   const sb = createClient(env('SUPABASE_URL'), key, { auth: { persistSession: false } });
+  SB = sb;
   const now = localNow();
   const log = [];
   try {
