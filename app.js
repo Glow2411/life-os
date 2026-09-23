@@ -3,11 +3,12 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 import {
   todayStr, addDays, buildAgenda, personStatus, lastCall, nextBirthday,
   serviceStatus, describeService, fmtKm, KIA_K4_SCHEDULE,
+  taskDueOn, describeRepeat, isTaskDone, taskStreak, fmtTime, fmtDateTime, REPEAT_LABEL,
 } from './logic.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = document.getElementById('app');
-const S = { people: [], calls: [], vehicles: [], items: [], log: [], mods: [] };
+const S = { people: [], calls: [], vehicles: [], items: [], log: [], mods: [], tasks: [], taskDone: [], reminders: [] };
 
 // ───────────── helpers ─────────────
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -26,28 +27,43 @@ async function run(promise) {
 }
 
 async function loadAll() {
-  const [people, calls, vehicles, items, log, mods] = await Promise.all([
+  const since = addDays(todayStr(), -400);
+  const [people, calls, vehicles, items, log, mods, tasks, taskDone, reminders] = await Promise.all([
     run(sb.from('people').select('*').order('name')),
     run(sb.from('calls').select('*').order('call_date', { ascending: false })),
     run(sb.from('vehicles').select('*').order('created_at')),
     run(sb.from('service_items').select('*').order('interval_km', { nullsFirst: false })),
     run(sb.from('service_log').select('*').order('done_date', { ascending: false })),
     run(sb.from('mods').select('*').order('added_date', { ascending: false, nullsFirst: false })),
+    run(sb.from('tasks').select('*').order('created_at')),
+    run(sb.from('task_done').select('task_id, done_date').gte('done_date', since)),
+    run(sb.from('reminders').select('*').order('next_at')),
   ]);
-  Object.assign(S, { people, calls, vehicles, items, log, mods });
+  Object.assign(S, { people, calls, vehicles, items, log, mods, tasks, taskDone, reminders });
 }
 
 // ───────────── generic form sheet ─────────────
 // field: { k, label, type: text|number|date|textarea|tel, required, half }
-function openForm({ title, subtitle, fields, values = {}, saveLabel = 'Save', onSave, onDelete }) {
+function openForm({ title, subtitle, fields, values = {}, saveLabel = 'Save', onSave, onDelete, onInput }) {
   const bg = document.createElement('div'); bg.className = 'sheet-bg';
   const input = f => {
     const v = values[f.k] ?? '';
+    const wrap = `data-field="${f.k}"${f.showIf ? ' data-show-if="1"' : ''}`;
+    if (f.type === 'checkbox') {
+      return `<div ${wrap}><label class="check"><input type="checkbox" name="${f.k}" ${v ? 'checked' : ''}> ${esc(f.label)}</label></div>`;
+    }
+    if (f.type === 'weekdays') {
+      const sel = new Set(v || []);
+      return `<div ${wrap}><label>${esc(f.label)}</label><div class="days">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d, i) =>
+        `<label class="day"><input type="checkbox" name="${f.k}" value="${i}" ${sel.has(i) ? 'checked' : ''}><span>${d}</span></label>`).join('')}</div></div>`;
+    }
     const common = `name="${f.k}" id="f_${f.k}" ${f.required ? 'required' : ''} placeholder="${esc(f.placeholder || '')}"`;
     const el = f.type === 'textarea'
       ? `<textarea ${common}>${esc(v)}</textarea>`
-      : `<input ${common} type="${f.type || 'text'}" value="${esc(v)}" ${f.type === 'number' ? 'inputmode="numeric"' : ''}>`;
-    return `<div><label for="f_${f.k}">${esc(f.label)}${f.required ? ' *' : ''}</label>${el}</div>`;
+      : f.type === 'select'
+        ? `<select ${common}>${f.options.map(([val, lab]) => `<option value="${esc(val)}" ${String(v) === String(val) ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>`
+        : `<input ${common} type="${f.type || 'text'}" value="${esc(v)}" ${f.type === 'number' ? 'inputmode="numeric"' : ''}>`;
+    return `<div ${wrap}><label for="f_${f.k}">${esc(f.label)}${f.required ? ' *' : ''}</label>${el}</div>`;
   };
   // pair up consecutive half-width fields
   let html = '', i = 0;
@@ -72,8 +88,11 @@ function openForm({ title, subtitle, fields, values = {}, saveLabel = 'Save', on
   bg.querySelector('form').addEventListener('submit', async e => {
     e.preventDefault();
     const out = {};
+    const form = e.target;
     for (const f of fields) {
-      const raw = e.target.elements[f.k].value.trim();
+      if (f.type === 'checkbox') { out[f.k] = form.querySelector(`[name="${f.k}"]`).checked; continue; }
+      if (f.type === 'weekdays') { out[f.k] = [...form.querySelectorAll(`[name="${f.k}"]:checked`)].map(x => Number(x.value)); continue; }
+      const raw = form.elements[f.k].value.trim();
       out[f.k] = raw === '' ? null : f.type === 'number' ? Number(raw) : raw;
     }
     e.submitter && (e.submitter.disabled = true);
@@ -81,6 +100,7 @@ function openForm({ title, subtitle, fields, values = {}, saveLabel = 'Save', on
     catch { e.submitter && (e.submitter.disabled = false); }
   });
   document.body.appendChild(bg);
+  if (onInput) { const f = bg.querySelector('form'); f.addEventListener('change', () => onInput(f)); onInput(f); }
   bg.querySelector('input, textarea')?.focus();
 }
 
@@ -143,6 +163,66 @@ const MOD_FIELDS = [
   { k: 'notes', label: 'Notes', type: 'textarea' },
 ];
 
+const TASK_FIELDS = [
+  { k: 'title', label: 'Task', required: true, placeholder: 'e.g. Gym, Vitamins, Read 20 min' },
+  { k: 'repeat', label: 'Repeat', type: 'select', options: [
+    ['1', 'Every day'], ['2', 'Alternate days'], ['n', 'Every N days'], ['weekdays', 'Specific days of the week']] },
+  { k: 'every_n', label: 'Every how many days?', type: 'number' },
+  { k: 'skip_weekends', label: 'Weekdays only (skip Sat & Sun)', type: 'checkbox' },
+  { k: 'weekdays', label: 'On these days', type: 'weekdays' },
+  { k: 'start_date', label: 'Starting', type: 'date', required: true },
+  { k: 'notes', label: 'Notes', type: 'textarea' },
+  { k: 'active', label: 'Active (untick to pause without losing the streak history)', type: 'checkbox' },
+];
+function taskFormValues(t) {
+  if (!t) return { repeat: '1', every_n: 3, start_date: todayStr(), weekdays: [1, 3, 5], active: true };
+  const repeat = t.repeat_type === 'weekdays' ? 'weekdays' : t.every_n === 1 ? '1' : t.every_n === 2 ? '2' : 'n';
+  return { ...t, repeat };
+}
+function taskFormToRow(v) {
+  const row = { title: v.title, notes: v.notes, start_date: v.start_date, skip_weekends: !!v.skip_weekends, weekdays: v.weekdays || [], active: !!v.active };
+  if (v.repeat === 'weekdays') Object.assign(row, { repeat_type: 'weekdays', every_n: 1, skip_weekends: false });
+  else Object.assign(row, { repeat_type: 'interval', every_n: v.repeat === 'n' ? Math.max(1, v.every_n || 1) : Number(v.repeat) });
+  if (row.repeat_type === 'weekdays' && !row.weekdays.length) { toast('Pick at least one day'); throw new Error('no days'); }
+  return row;
+}
+function taskFormToggle(form) {
+  const r = form.elements.repeat.value;
+  const show = (k, on) => { const el = form.querySelector(`[data-field="${k}"]`); if (el) el.style.display = on ? '' : 'none'; };
+  show('every_n', r === 'n'); show('skip_weekends', r !== 'weekdays'); show('weekdays', r === 'weekdays');
+}
+
+// datetime-local <-> ISO (local time)
+const toLocalInput = ts => { const d = new Date(ts); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+const fromLocalInput = s => new Date(s).toISOString();
+function nextOccurrence(anchorIso, repeat, afterMs) {
+  if (repeat === 'none') return null;
+  const a = new Date(anchorIso);
+  for (let k = 1; k < 100000; k++) {
+    const d = new Date(a);
+    if (repeat === 'daily') d.setDate(a.getDate() + k);
+    if (repeat === 'weekly') d.setDate(a.getDate() + 7 * k);
+    if (repeat === 'monthly') d.setMonth(a.getMonth() + k);
+    if (repeat === 'yearly') d.setFullYear(a.getFullYear() + k);
+    if (d.getTime() > afterMs) return d.toISOString();
+  }
+  return null;
+}
+const REMINDER_FIELDS = [
+  { k: 'title', label: 'Remind me to…', required: true },
+  { k: 'when', label: 'Date & time', type: 'datetime-local', required: true },
+  { k: 'repeat', label: 'Repeat', type: 'select', options: Object.entries(REPEAT_LABEL) },
+  { k: 'notes', label: 'Notes', type: 'textarea' },
+];
+function reminderRow(v, existing) {
+  const at = fromLocalInput(v.when);
+  let next = at;
+  if (v.repeat !== 'none' && new Date(at).getTime() <= Date.now()) next = nextOccurrence(at, v.repeat, Date.now());
+  const row = { title: v.title, notes: v.notes, repeat: v.repeat, remind_at: at, next_at: next, done: false };
+  if (!existing || existing.next_at !== next) row.sent_at = null;
+  return row;
+}
+
 // ───────────── actions ─────────────
 const save = (table, row, id) => id ? run(sb.from(table).update(row).eq('id', id)) : run(sb.from(table).insert(row));
 const del = (table, id) => run(sb.from(table).delete().eq('id', id));
@@ -196,6 +276,40 @@ const A = {
   editMod: id => openForm({ title: 'Edit accessory / mod', fields: MOD_FIELDS, values: byId(S.mods, id),
     onSave: v => save('mods', v, id), onDelete: () => del('mods', id) }),
   loadK4: async vid => { await loadK4(vid); await refresh(); },
+
+  addTask: () => openForm({ title: 'New daily task', fields: TASK_FIELDS, values: taskFormValues(), onInput: taskFormToggle,
+    onSave: v => save('tasks', taskFormToRow(v)) }),
+  editTask: id => openForm({ title: 'Edit task', fields: TASK_FIELDS, values: taskFormValues(byId(S.tasks, id)), onInput: taskFormToggle,
+    onSave: v => save('tasks', taskFormToRow(v), id), onDelete: () => del('tasks', id) }),
+  toggleTask: async id => {
+    const today = todayStr();
+    if (isTaskDone(id, today, S.taskDone)) await run(sb.from('task_done').delete().eq('task_id', id).eq('done_date', today));
+    else await run(sb.from('task_done').insert({ task_id: id, done_date: today }));
+    await refresh();
+  },
+  pauseTask: async id => { const t = byId(S.tasks, id); await save('tasks', { active: t.active === false }, id); await refresh(); },
+
+  addReminder: () => {
+    const d = new Date(); d.setHours(d.getHours() + 1, 0, 0, 0);
+    openForm({ title: 'New reminder', fields: REMINDER_FIELDS, values: { when: toLocalInput(d), repeat: 'none' },
+      onSave: v => save('reminders', reminderRow(v)) });
+  },
+  editReminder: id => {
+    const r = byId(S.reminders, id);
+    openForm({ title: 'Edit reminder', fields: REMINDER_FIELDS, values: { ...r, when: toLocalInput(r.next_at) },
+      onSave: v => save('reminders', reminderRow(v, r), id), onDelete: () => del('reminders', id) });
+  },
+  reminderDone: async id => {
+    const r = byId(S.reminders, id);
+    if (r.repeat === 'none') await save('reminders', { done: true }, id);
+    else await save('reminders', { next_at: nextOccurrence(r.remind_at, r.repeat, Math.max(Date.now(), new Date(r.next_at).getTime())), sent_at: null }, id);
+    toast(r.repeat === 'none' ? 'Done ✓' : 'Done, next one scheduled');
+    await refresh();
+  },
+  snoozeReminder: async (id, mins) => {
+    await save('reminders', { next_at: new Date(Date.now() + mins * 60000).toISOString(), sent_at: null, done: false }, id);
+    toast(`Snoozed ${mins >= 60 ? mins / 60 + ' h' : mins + ' min'}`); await refresh();
+  },
   signOut: async () => { await sb.auth.signOut(); location.hash = ''; boot(); },
 };
 
@@ -216,7 +330,7 @@ document.addEventListener('click', e => {
 });
 
 // ───────────── screens ─────────────
-const TABS = [['today', '📋', 'Today'], ['people', '👥', 'People'], ['garage', '🚗', 'Garage']];
+const TABS = [['today', '📋', 'Today'], ['tasks', '✅', 'Tasks'], ['reminders', '⏰', 'Reminders'], ['people', '👥', 'People'], ['garage', '🚗', 'Garage']];
 function shell(title, body, tab, headerRight = '') {
   app.innerHTML = `
     <header class="top"><h1>${esc(title)}</h1>${headerRight}</header>
@@ -225,19 +339,96 @@ function shell(title, body, tab, headerRight = '') {
       `<a href="#${k}" class="${tab === k ? 'on' : ''}"><span class="ico">${ico}</span>${label}</a>`).join('')}</nav>`;
 }
 
+// ── shared row renderers ──
+function taskRow(t, today = todayStr()) {
+  const done = isTaskDone(t.id, today, S.taskDone);
+  const streak = taskStreak(t, S.taskDone, today);
+  return `<div class="row">
+      <button class="tick ${done ? 'on' : ''}" data-a="toggleTask" data-id="${t.id}" aria-label="Mark ${esc(t.title)} done">${done ? '✓' : ''}</button>
+      <div class="grow tap" data-a="editTask" data-id="${t.id}"><div class="title ${done ? 'struck' : ''}">${esc(t.title)}</div>
+        <div class="sub">${esc(describeRepeat(t))}</div></div>
+      ${streak ? `<span class="chip ok">🔥 ${streak}</span>` : ''}
+    </div>`;
+}
+function reminderRowHtml(r) {
+  const due = new Date(r.next_at).getTime() <= Date.now();
+  const state = r.done ? 'none' : due ? 'due' : new Date(r.next_at) - Date.now() < 86400000 ? 'soon' : 'ok';
+  return `<div class="row">
+      <div class="grow tap" data-a="editReminder" data-id="${r.id}"><div class="title ${r.done ? 'struck' : ''}">${esc(r.title)}</div>
+        <div class="sub">${esc(fmtDateTime(r.next_at))}${r.repeat !== 'none' ? ` · ${esc(REPEAT_LABEL[r.repeat])}` : ''}</div>
+        ${r.notes ? `<div class="sub">${esc(r.notes)}</div>` : ''}</div>
+      ${r.done ? chip('none', 'Done') : due
+        ? `<button class="ghost small" data-a="snoozeReminder" data-id="${r.id}" data-n="60">+1 h</button><button class="small" data-a="reminderDone" data-id="${r.id}">Done</button>`
+        : chip(state, state === 'soon' ? fmtTime(r.next_at) : 'Upcoming')}
+    </div>`;
+}
+
 function screenToday() {
+  const today = todayStr();
   const agenda = buildAgenda({ people: S.people, calls: S.calls, vehicles: S.vehicles, items: S.items });
   const target = x => (x.kind === 'call' || x.kind === 'birthday') ? `#person/${x.id}` : `#vehicle/${x.id}`;
-  const body = agenda.length
+  const todaysTasks = S.tasks.filter(t => taskDueOn(t, today));
+  const doneCount = todaysTasks.filter(t => isTaskDone(t.id, today, S.taskDone)).length;
+  const endOfDay = new Date(); endOfDay.setHours(23, 59, 59, 999);
+  const rems = S.reminders.filter(r => !r.done && new Date(r.next_at) <= endOfDay);
+
+  const tasksCard = todaysTasks.length ? `<div class="card"><h2>Today's tasks · ${doneCount}/${todaysTasks.length}</h2>
+      ${todaysTasks.map(t => taskRow(t, today)).join('')}</div>` : '';
+  const remCard = rems.length ? `<div class="card"><h2>Reminders today</h2>${rems.map(reminderRowHtml).join('')}</div>` : '';
+  const agendaCard = agenda.length
     ? `<div class="card"><h2>${agenda.length} thing${agenda.length > 1 ? 's' : ''} need attention</h2>${agenda.map(x => `
         <div class="row tap" data-a="go" data-id="${target(x)}">
           <div class="grow"><div class="title">${esc(x.title)}</div>
             <div class="sub">${esc(x.detail)}</div>${x.extra ? `<div class="sub">${esc(x.extra)}</div>` : ''}</div>
           ${chip(x.level, x.level === 'due' ? 'Due' : 'Soon')}
-        </div>`).join('')}</div>`
-    : `<div class="card empty">✅ Nothing due. Enjoy the day.</div>`;
+        </div>`).join('')}</div>` : '';
+  const body = tasksCard + remCard + agendaCard || `<div class="card empty">✅ Nothing due. Enjoy the day.</div>`;
   const d = new Date().toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
   shell(d, body, 'today', `<button class="ghost small" data-a="signOut">Sign out</button>`);
+}
+
+function screenTasks() {
+  const today = todayStr();
+  const active = S.tasks.filter(t => t.active !== false);
+  const todays = active.filter(t => taskDueOn(t, today));
+  const others = active.filter(t => !taskDueOn(t, today));
+  const paused = S.tasks.filter(t => t.active === false);
+  // last 7 days completion strip
+  const days = [...Array(7)].map((_, i) => addDays(today, i - 6));
+  const strip = days.map(d => {
+    const due = active.filter(t => taskDueOn(t, d));
+    const done = due.filter(t => isTaskDone(t.id, d, S.taskDone)).length;
+    const pct = due.length ? done / due.length : null;
+    const cls = pct === null ? 'none' : pct === 1 ? 'ok' : pct > 0 ? 'soon' : 'due';
+    return `<div class="dstat"><div class="dot ${cls}">${due.length ? `${done}/${due.length}` : '–'}</div>
+      <div class="muted">${new Date(d + 'T12:00').toLocaleDateString('en-CA', { weekday: 'narrow' })}</div></div>`;
+  }).join('');
+  const body = !S.tasks.length ? `<div class="card empty">No daily tasks yet.<br>Add things like gym, vitamins or reading.
+      <div class="actions" style="justify-content:center"><button data-a="addTask">+ Add a task</button></div></div>`
+    : `<div class="card"><h2>Today · ${todays.filter(t => isTaskDone(t.id, today, S.taskDone)).length}/${todays.length} done</h2>
+        ${todays.map(t => taskRow(t, today)).join('') || '<div class="muted">Nothing scheduled today.</div>'}</div>
+      <div class="card"><h2>Last 7 days</h2><div class="strip">${strip}</div></div>
+      ${others.length ? `<div class="card"><h2>Not today</h2>${others.map(t => `<div class="row tap" data-a="editTask" data-id="${t.id}">
+          <div class="grow"><div class="title">${esc(t.title)}</div><div class="sub">${esc(describeRepeat(t))}</div></div>
+          ${taskStreak(t, S.taskDone, today) ? `<span class="chip ok">🔥 ${taskStreak(t, S.taskDone, today)}</span>` : ''}</div>`).join('')}</div>` : ''}
+      ${paused.length ? `<div class="card"><h2>Paused</h2>${paused.map(t => `<div class="row"><div class="grow tap" data-a="editTask" data-id="${t.id}">
+          <div class="title">${esc(t.title)}</div><div class="sub">${esc(describeRepeat(t))}</div></div>
+          <button class="ghost small" data-a="pauseTask" data-id="${t.id}">Resume</button></div>`).join('')}</div>` : ''}`;
+  shell('Daily tasks', body, 'tasks', `<button class="small" data-a="addTask">+ Add</button>`);
+}
+
+function screenReminders() {
+  const now = Date.now();
+  const open = S.reminders.filter(r => !r.done);
+  const due = open.filter(r => new Date(r.next_at).getTime() <= now);
+  const upcoming = open.filter(r => new Date(r.next_at).getTime() > now);
+  const done = S.reminders.filter(r => r.done).slice(-10).reverse();
+  const body = !S.reminders.length ? `<div class="card empty">No reminders yet.<br>You'll get a phone notification at the time you set.
+      <div class="actions" style="justify-content:center"><button data-a="addReminder">+ Add a reminder</button></div></div>`
+    : `${due.length ? `<div class="card"><h2>Due now</h2>${due.map(reminderRowHtml).join('')}</div>` : ''}
+       <div class="card"><h2>Upcoming</h2>${upcoming.map(reminderRowHtml).join('') || '<div class="muted">Nothing scheduled.</div>'}</div>
+       ${done.length ? `<div class="card"><h2>Recently done</h2>${done.map(reminderRowHtml).join('')}</div>` : ''}`;
+  shell('Reminders', body, 'reminders', `<button class="small" data-a="addReminder">+ Add</button>`);
 }
 
 function screenPeople() {
@@ -370,7 +561,7 @@ function screenVehicle(id) {
 
 function render() {
   const [route, id] = (location.hash.slice(1) || 'today').split('/');
-  ({ today: screenToday, people: screenPeople, person: () => screenPerson(id),
+  ({ today: screenToday, tasks: screenTasks, reminders: screenReminders, people: screenPeople, person: () => screenPerson(id),
      garage: screenGarage, vehicle: () => screenVehicle(id) }[route] || screenToday)();
 }
 async function refresh() { await loadAll(); render(); }
