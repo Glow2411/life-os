@@ -18,7 +18,7 @@ async function all(table) {
 }
 
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const ICON = { call: '📞', birthday: '🎂', service: '🔧', odometer: '🚗', renewal: '📄' };
+const ICON = { call: '📞', birthday: '🎂', service: '🔧', odometer: '🚗', renewal: '📄', task: '✅', reminder: '⏰' };
 
 export function renderEmail(agenda, today, appUrl) {
   const due = agenda.filter(a => a.level === 'due'), soon = agenda.filter(a => a.level === 'soon');
@@ -45,8 +45,9 @@ async function main() {
   for (const [k, v] of Object.entries(required)) if (!v) throw new Error(`Missing secret: ${k}`);
   sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
   const today = todayStr();
-  const [people, calls, vehicles, items] = await Promise.all(['people', 'calls', 'vehicles', 'service_items'].map(all));
-  const agenda = buildAgenda({ people, calls, vehicles, items }, today);
+  const [people, calls, vehicles, items, tasks, taskDone, reminders] =
+    await Promise.all(['people', 'calls', 'vehicles', 'service_items', 'tasks', 'task_done', 'reminders'].map(all));
+  const agenda = buildAgenda({ people, calls, vehicles, items, tasks, taskDone, reminders }, today);
   console.log(`${today}: ${agenda.length} agenda item(s)`);
   agenda.forEach(a => console.log(` - [${a.level}] ${a.title}: ${a.detail}`));
 
