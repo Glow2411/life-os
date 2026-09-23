@@ -1,6 +1,6 @@
 // Quick self-check of the due-date logic with made-up data: `npm test`
 import assert from 'node:assert/strict';
-import { buildAgenda, personStatus, serviceStatus, addMonths, nextBirthday } from '../logic.js';
+import { buildAgenda, personStatus, serviceStatus, addMonths, nextBirthday, taskDueOn, taskStreak, describeRepeat, todayStr } from '../logic.js';
 import { renderEmail } from './send-digest.js';
 
 const today = '2026-09-23';
@@ -39,6 +39,34 @@ console.log(agenda.map(a => `[${a.level}] ${a.title} — ${a.detail}`).join('\n'
 const kinds = agenda.map(a => a.kind).sort();
 assert.deepEqual(kinds, ['birthday', 'call', 'odometer', 'renewal', 'service', 'service']);
 assert.equal(agenda[0].level, 'due');
+
+// ── tasks ── (2026-09-23 is a Wednesday)
+const daily = { id: 't1', repeat_type: 'interval', every_n: 1, start_date: '2026-09-21' };
+const alt = { id: 't2', repeat_type: 'interval', every_n: 2, start_date: '2026-09-21' };
+const altWk = { id: 't3', repeat_type: 'interval', every_n: 2, skip_weekends: true, start_date: '2026-09-21' };
+const mwf = { id: 't4', repeat_type: 'weekdays', weekdays: [1, 3, 5], start_date: '2026-09-01' };
+const wkday = { id: 't5', repeat_type: 'interval', every_n: 1, skip_weekends: true, start_date: '2026-09-01' };
+assert.equal(taskDueOn(daily, '2026-09-26'), true);
+assert.equal(taskDueOn(daily, '2026-09-20'), false);          // before start
+assert.equal(taskDueOn(alt, '2026-09-23'), true);             // Mon, Wed, Fri, Sun…
+assert.equal(taskDueOn(alt, '2026-09-24'), false);
+assert.equal(taskDueOn(alt, '2026-09-27'), true);             // Sunday counts
+// alternate weekdays: Mon 21, Wed 23, Fri 25, Tue 29 (skips weekend), Thu Oct 1
+assert.deepEqual(['2026-09-21','2026-09-23','2026-09-25','2026-09-29','2026-10-01'].map(d => taskDueOn(altWk, d)), [true, true, true, true, true]);
+assert.deepEqual(['2026-09-22','2026-09-26','2026-09-28','2026-09-30'].map(d => taskDueOn(altWk, d)), [false, false, false, false]);
+assert.equal(taskDueOn(mwf, '2026-09-23'), true);
+assert.equal(taskDueOn(mwf, '2026-09-24'), false);
+assert.equal(taskDueOn(wkday, '2026-09-26'), false);
+assert.equal(describeRepeat(altWk), 'Alternate days (weekdays only)');
+assert.equal(describeRepeat(mwf), 'Mon, Wed, Fri');
+const done = [{ task_id: 't1', done_date: '2026-09-21' }, { task_id: 't1', done_date: '2026-09-22' },
+              { task_id: 't2', done_date: '2026-09-21' }, { task_id: 't2', done_date: '2026-09-23' }];
+assert.equal(taskStreak(daily, done, today), 2);              // today not done yet → still 2
+assert.equal(taskStreak(alt, done, today), 2);
+assert.equal(taskStreak(mwf, done, today), 0);
+const ag2 = buildAgenda({ tasks: [daily, alt, mwf], taskDone: done,
+  reminders: [{ id: 'r1', title: 'Pay rent', next_at: new Date().toISOString() }, { id: 'r2', title: 'Future', next_at: '2099-01-01T12:00:00Z' }] }, todayStr());
+console.log('\n' + ag2.map(a => `[${a.level}] ${a.kind}: ${a.title} — ${a.detail}`).join('\n'));
 
 const mail = renderEmail(agenda, today, 'https://example.github.io/life-os/');
 console.log('\nSubject:', mail.subject);
