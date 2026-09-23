@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 11 * * *'   # 11:00 UTC = 7:00 AM Toronto in summer (6:00 AM in winter)
   workflow_dispatch:        # lets you run it manually from the Actions tab
+    inputs:
+      send_even_if_empty:
+        description: 'Send a test email even if nothing is due'
+        type: boolean
+        default: false
 
 permissions:
   contents: write           # only used by the keep-alive step below
@@ -27,6 +32,7 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           DIGEST_TO: ${{ secrets.DIGEST_TO }}
           APP_URL: ${{ vars.APP_URL }}
+          SEND_WHEN_EMPTY: ${{ inputs.send_even_if_empty }}
 
       # GitHub pauses scheduled jobs after 60 days without commits.
       # This makes an empty commit every ~50 days so the digest keeps running.
