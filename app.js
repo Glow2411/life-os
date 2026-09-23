@@ -4,11 +4,12 @@ import {
   todayStr, addDays, buildAgenda, personStatus, lastCall, nextBirthday,
   serviceStatus, describeService, fmtKm, KIA_K4_SCHEDULE,
   taskDueOn, describeRepeat, isTaskDone, taskStreak, fmtTime, fmtDateTime, REPEAT_LABEL,
+  MODULES, CHANNEL_LABEL, prefFor, DEFAULT_LISTS,
 } from './logic.js';
 
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = document.getElementById('app');
-const S = { people: [], calls: [], vehicles: [], items: [], log: [], mods: [], tasks: [], taskDone: [], reminders: [] };
+const S = { people: [], calls: [], vehicles: [], items: [], log: [], mods: [], tasks: [], taskDone: [], reminders: [], prefs: [], picklists: [] };
 
 // ───────────── helpers ─────────────
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -28,7 +29,7 @@ async function run(promise) {
 
 async function loadAll() {
   const since = addDays(todayStr(), -400);
-  const [people, calls, vehicles, items, log, mods, tasks, taskDone, reminders] = await Promise.all([
+  const [people, calls, vehicles, items, log, mods, tasks, taskDone, reminders, prefs, picklists] = await Promise.all([
     run(sb.from('people').select('*').order('name')),
     run(sb.from('calls').select('*').order('call_date', { ascending: false })),
     run(sb.from('vehicles').select('*').order('created_at')),
@@ -38,9 +39,28 @@ async function loadAll() {
     run(sb.from('tasks').select('*').order('created_at')),
     run(sb.from('task_done').select('task_id, done_date').gte('done_date', since)),
     run(sb.from('reminders').select('*').order('next_at')),
+    run(sb.from('notify_prefs').select('*')),
+    run(sb.from('picklists').select('*').order('sort')),
   ]);
-  Object.assign(S, { people, calls, vehicles, items, log, mods, tasks, taskDone, reminders });
+  Object.assign(S, { people, calls, vehicles, items, log, mods, tasks, taskDone, reminders, prefs, picklists });
 }
+
+// ───────────── picklists ─────────────
+// Values for a named list: your edited values (picklists table) or the defaults in logic.js
+function getList(name) {
+  const mine = S.picklists.filter(p => p.list === name).map(p => p.value);
+  return mine.length ? mine : (DEFAULT_LISTS[name]?.values || []);
+}
+// Distinct non-empty values already used in a column (for type-ahead suggestions)
+const used = (rows, key) => [...new Set(rows.map(r => r[key]).filter(Boolean))].sort();
+const range = (a, b, step = 1) => { const out = []; for (let x = a; x <= b; x += step) out.push(x); return out; };
+const KM_OPTIONS = [3000, 5000, 6000, 8000, 10000, 12000, 15000, 20000, 24000, 30000, 36000, 40000, 48000, 50000, 60000, 72000, 80000, 90000, 91000, 96000, 100000, 120000, 150000, 160000, 195000, 200000]
+  .map(k => [k, `${k.toLocaleString('en-CA')} km`]);
+const MONTH_OPTIONS = [1, 2, 3, 4, 6, 9, 12, 18, 24, 36, 48, 60, 72, 84, 96, 120].map(m => [m, m < 12 || m % 12 ? `${m} months` : m === 12 ? '1 year' : `${m / 12} years`]);
+const CALL_EVERY = [[7, 'Every week'], [14, 'Every 2 weeks'], [21, 'Every 3 weeks'], [30, 'Every month'], [45, 'Every 6 weeks'],
+  [60, 'Every 2 months'], [90, 'Every 3 months'], [180, 'Every 6 months'], [365, 'Once a year']];
+const TIME_OPTIONS = range(0, 47).map(i => { const h = Math.floor(i / 2), m = i % 2 ? '30' : '00';
+  return [`${String(h).padStart(2, '0')}:${m}`, new Date(2000, 0, 1, h, +m).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' })]; });
 
 // ───────────── generic form sheet ─────────────
 // field: { k, label, type: text|number|date|textarea|tel, required, half }
@@ -58,10 +78,25 @@ function openForm({ title, subtitle, fields, values = {}, saveLabel = 'Save', on
         `<label class="day"><input type="checkbox" name="${f.k}" value="${i}" ${sel.has(i) ? 'checked' : ''}><span>${d}</span></label>`).join('')}</div></div>`;
     }
     const common = `name="${f.k}" id="f_${f.k}" ${f.required ? 'required' : ''} placeholder="${esc(f.placeholder || '')}"`;
+    if (f.type === 'pick') {        // dropdown from a picklist + "Other…" free text
+      const opts = getList(f.list);
+      const isOther = v !== '' && v != null && !opts.includes(v);
+      return `<div ${wrap}><label for="f_${f.k}">${esc(f.label)}${f.required ? ' *' : ''}</label>
+        <select ${common} data-pick="${f.k}"><option value="">—</option>${opts.map(o => `<option ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('')}
+          <option value="__other" ${isOther ? 'selected' : ''}>Other…</option></select>
+        <input name="${f.k}__other" placeholder="Type a value" value="${isOther ? esc(v) : ''}" style="margin-top:6px;${isOther ? '' : 'display:none'}"></div>`;
+    }
+    if (f.type === 'suggest') {     // free text with type-ahead from a picklist + values already used
+      const opts = [...new Set([...(f.list ? getList(f.list) : []), ...(f.extra ? f.extra() : [])])];
+      return `<div ${wrap}><label for="f_${f.k}">${esc(f.label)}${f.required ? ' *' : ''}</label>
+        <input ${common} list="dl_${f.k}" value="${esc(v)}" autocomplete="off"><datalist id="dl_${f.k}">${opts.map(o => `<option value="${esc(o)}">`).join('')}</datalist></div>`;
+    }
     const el = f.type === 'textarea'
       ? `<textarea ${common}>${esc(v)}</textarea>`
       : f.type === 'select'
-        ? `<select ${common}>${f.options.map(([val, lab]) => `<option value="${esc(val)}" ${String(v) === String(val) ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>`
+        ? `<select ${common}>${f.blank !== undefined ? `<option value="">${esc(f.blank)}</option>` : ''}${
+            (f.options.some(([val]) => String(val) === String(v)) || v === '' || v == null ? f.options : [...f.options, [v, String(v)]])
+              .map(([val, lab]) => `<option value="${esc(val)}" ${String(v) === String(val) ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>`
         : `<input ${common} type="${f.type || 'text'}" value="${esc(v)}" ${f.type === 'number' ? 'inputmode="numeric"' : ''}>`;
     return `<div ${wrap}><label for="f_${f.k}">${esc(f.label)}${f.required ? ' *' : ''}</label>${el}</div>`;
   };
@@ -92,12 +127,17 @@ function openForm({ title, subtitle, fields, values = {}, saveLabel = 'Save', on
     for (const f of fields) {
       if (f.type === 'checkbox') { out[f.k] = form.querySelector(`[name="${f.k}"]`).checked; continue; }
       if (f.type === 'weekdays') { out[f.k] = [...form.querySelectorAll(`[name="${f.k}"]:checked`)].map(x => Number(x.value)); continue; }
-      const raw = form.elements[f.k].value.trim();
-      out[f.k] = raw === '' ? null : f.type === 'number' ? Number(raw) : raw;
+      let raw = form.elements[f.k].value.trim();
+      if (f.type === 'pick' && raw === '__other') raw = form.elements[f.k + '__other'].value.trim();
+      out[f.k] = raw === '' ? null : (f.type === 'number' || f.numeric) ? Number(raw) : raw;
     }
     e.submitter && (e.submitter.disabled = true);
     try { await onSave(out); close(); await refresh(); }
     catch { e.submitter && (e.submitter.disabled = false); }
+  });
+  bg.querySelector('form').addEventListener('change', e => {      // show the "Other…" text box when picked
+    const k = e.target.dataset?.pick;
+    if (k) { const o = bg.querySelector(`[name="${k}__other"]`); o.style.display = e.target.value === '__other' ? '' : 'none'; if (e.target.value === '__other') o.focus(); }
   });
   document.body.appendChild(bg);
   if (onInput) { const f = bg.querySelector('form'); f.addEventListener('change', () => onInput(f)); onInput(f); }
@@ -108,66 +148,70 @@ function openForm({ title, subtitle, fields, values = {}, saveLabel = 'Save', on
 const PERSON_FIELDS = [
   { k: 'name', label: 'Name', required: true },
   { k: 'phone', label: 'Phone', type: 'tel', half: true },
-  { k: 'relationship', label: 'Relationship', placeholder: 'friend, family…', half: true },
-  { k: 'company', label: 'Works at', half: true },
-  { k: 'job_title', label: 'Role', half: true },
-  { k: 'city', label: 'City', half: true },
+  { k: 'relationship', label: 'Relationship', type: 'pick', list: 'relationship', half: true },
+  { k: 'company', label: 'Works at', type: 'suggest', extra: () => used(S.people, 'company'), half: true },
+  { k: 'job_title', label: 'Role', type: 'suggest', extra: () => used(S.people, 'job_title'), half: true },
+  { k: 'city', label: 'City', type: 'suggest', extra: () => used(S.people, 'city'), half: true },
   { k: 'birthday', label: 'Birthday', type: 'date', half: true },
   { k: 'partner_name', label: 'Partner' },
   { k: 'kids', label: 'Kids', placeholder: 'e.g. Aarav (5), Meera (2)' },
-  { k: 'interests', label: 'Interests', placeholder: 'cricket, hiking, new house…' },
+  { k: 'interests', label: 'Interests', type: 'suggest', extra: () => used(S.people, 'interests'), placeholder: 'cricket, hiking, new house…' },
   { k: 'notes', label: 'Other notes', type: 'textarea' },
-  { k: 'call_every_days', label: 'Remind me to call every (days) — blank = never', type: 'number' },
+  { k: 'call_every_days', label: 'Remind me to call', type: 'select', numeric: true, blank: 'Never', options: CALL_EVERY },
 ];
 const CALL_FIELDS = [
-  { k: 'call_date', label: 'Date', type: 'date', required: true },
+  { k: 'call_date', label: 'Date', type: 'date', required: true, half: true },
+  { k: 'call_type', label: 'How', type: 'pick', list: 'call_type', half: true },
   { k: 'summary', label: 'What did you talk about?', type: 'textarea' },
   { k: 'follow_ups', label: 'Ask about next time', type: 'textarea', placeholder: 'job interview result, trip to India…' },
 ];
 const VEHICLE_FIELDS = [
   { k: 'name', label: 'Nickname', required: true },
-  { k: 'make', label: 'Make', half: true }, { k: 'model', label: 'Model', half: true },
-  { k: 'year', label: 'Year', type: 'number', half: true }, { k: 'trim', label: 'Trim', half: true },
-  { k: 'color', label: 'Colour', half: true }, { k: 'plate', label: 'Plate', half: true },
+  { k: 'make', label: 'Make', type: 'pick', list: 'car_make', half: true },
+  { k: 'model', label: 'Model', type: 'suggest', extra: () => used(S.vehicles, 'model'), half: true },
+  { k: 'year', label: 'Year', type: 'select', numeric: true, blank: '—', options: range(1995, new Date().getFullYear() + 1).reverse().map(y => [y, y]), half: true },
+  { k: 'trim', label: 'Trim', type: 'suggest', extra: () => ['LX', 'EX', 'GT-Line', 'GT-Line Turbo', ...used(S.vehicles, 'trim')], half: true },
+  { k: 'color', label: 'Colour', type: 'pick', list: 'car_color', half: true }, { k: 'plate', label: 'Plate', half: true },
   { k: 'vin', label: 'VIN' },
   { k: 'purchase_date', label: 'Purchase date', type: 'date', half: true },
   { k: 'purchase_km', label: 'Km at purchase', type: 'number', half: true },
   { k: 'current_km', label: 'Current odometer (km)', type: 'number' },
-  { k: 'insurance_provider', label: 'Insurer', half: true }, { k: 'insurance_policy', label: 'Policy #', half: true },
+  { k: 'insurance_provider', label: 'Insurer', type: 'pick', list: 'insurer', half: true }, { k: 'insurance_policy', label: 'Policy #', half: true },
   { k: 'insurance_expiry', label: 'Insurance renews', type: 'date', half: true },
   { k: 'registration_expiry', label: 'Plate sticker expires', type: 'date', half: true },
-  { k: 'tire_size', label: 'Tire size', half: true }, { k: 'oil_spec', label: 'Oil spec', half: true },
+  { k: 'tire_size', label: 'Tire size', type: 'pick', list: 'tire_size', half: true },
+  { k: 'oil_spec', label: 'Oil spec', type: 'pick', list: 'oil_spec', half: true },
   { k: 'notes', label: 'Notes', type: 'textarea' },
 ];
 const ITEM_FIELDS = [
-  { k: 'name', label: 'Service', required: true },
-  { k: 'interval_km', label: 'Every (km)', type: 'number', half: true },
-  { k: 'interval_months', label: 'Every (months)', type: 'number', half: true },
+  { k: 'name', label: 'Service', type: 'pick', list: 'service_type', required: true },
+  { k: 'interval_km', label: 'Every', type: 'select', numeric: true, blank: 'No km limit', options: KM_OPTIONS, half: true },
+  { k: 'interval_months', label: 'Or every', type: 'select', numeric: true, blank: 'No time limit', options: MONTH_OPTIONS, half: true },
   { k: 'last_done_km', label: 'Last done at (km)', type: 'number', half: true },
   { k: 'last_done_date', label: 'Last done on', type: 'date', half: true },
   { k: 'notes', label: 'Notes', type: 'textarea' },
 ];
 const LOG_FIELDS = [
-  { k: 'title', label: 'What was done', required: true },
+  { k: 'title', label: 'What was done', type: 'pick', list: 'service_type', required: true },
   { k: 'done_date', label: 'Date', type: 'date', required: true, half: true },
   { k: 'km', label: 'Odometer (km)', type: 'number', half: true },
-  { k: 'shop', label: 'Shop', half: true },
+  { k: 'shop', label: 'Shop', type: 'pick', list: 'shop', half: true },
   { k: 'cost', label: 'Cost ($)', type: 'number', half: true },
   { k: 'notes', label: 'Notes', type: 'textarea' },
 ];
 const MOD_FIELDS = [
-  { k: 'name', label: 'What was added', required: true },
+  { k: 'name', label: 'What was added', type: 'pick', list: 'mod_type', required: true },
   { k: 'added_date', label: 'Date', type: 'date', half: true },
   { k: 'cost', label: 'Cost ($)', type: 'number', half: true },
-  { k: 'installer', label: 'Installed by' },
+  { k: 'installer', label: 'Installed by', type: 'pick', list: 'shop' },
   { k: 'notes', label: 'Notes', type: 'textarea' },
 ];
 
 const TASK_FIELDS = [
-  { k: 'title', label: 'Task', required: true, placeholder: 'e.g. Gym, Vitamins, Read 20 min' },
+  { k: 'title', label: 'Task', type: 'suggest', list: 'task_title', required: true, placeholder: 'Pick or type, e.g. Gym' },
   { k: 'repeat', label: 'Repeat', type: 'select', options: [
     ['1', 'Every day'], ['2', 'Alternate days'], ['n', 'Every N days'], ['weekdays', 'Specific days of the week']] },
-  { k: 'every_n', label: 'Every how many days?', type: 'number' },
+  { k: 'every_n', label: 'Every', type: 'select', numeric: true, options: range(3, 30).map(n => [n, `${n} days`]) },
   { k: 'skip_weekends', label: 'Weekdays only (skip Sat & Sun)', type: 'checkbox' },
   { k: 'weekdays', label: 'On these days', type: 'weekdays' },
   { k: 'start_date', label: 'Starting', type: 'date', required: true },
@@ -209,16 +253,17 @@ function nextOccurrence(anchorIso, repeat, afterMs) {
   return null;
 }
 const REMINDER_FIELDS = [
-  { k: 'title', label: 'Remind me to…', required: true },
+  { k: 'title', label: 'Remind me to…', type: 'suggest', list: 'reminder_title', required: true, placeholder: 'Pick or type' },
   { k: 'when', label: 'Date & time', type: 'datetime-local', required: true },
   { k: 'repeat', label: 'Repeat', type: 'select', options: Object.entries(REPEAT_LABEL) },
+  { k: 'channel', label: 'Notify me by', type: 'select', blank: 'Default (Settings)', options: Object.entries(CHANNEL_LABEL) },
   { k: 'notes', label: 'Notes', type: 'textarea' },
 ];
 function reminderRow(v, existing) {
   const at = fromLocalInput(v.when);
   let next = at;
   if (v.repeat !== 'none' && new Date(at).getTime() <= Date.now()) next = nextOccurrence(at, v.repeat, Date.now());
-  const row = { title: v.title, notes: v.notes, repeat: v.repeat, remind_at: at, next_at: next, done: false };
+  const row = { title: v.title, notes: v.notes, repeat: v.repeat, channel: v.channel || null, remind_at: at, next_at: next, done: false };
   if (!existing || existing.next_at !== next) row.sent_at = null;
   return row;
 }
@@ -311,7 +356,40 @@ const A = {
     toast(`Snoozed ${mins >= 60 ? mins / 60 + ' h' : mins + ' min'}`); await refresh();
   },
   signOut: async () => { await sb.auth.signOut(); location.hash = ''; boot(); },
+
+  // ── settings: notifications ──
+  setPref: async (key, value) => {            // key = "module:field"
+    const [module, field] = key.split(':');
+    const cur = prefFor(S.prefs, module);
+    const row = { module, channel: cur.channel, alert_time: cur.alert_time, [field]: value || null };
+    await run(sb.from('notify_prefs').upsert(row, { onConflict: 'user_id,module' }));
+    toast('Saved'); await refresh();
+  },
+  testAlert: async (channel) => {
+    await save('reminders', { title: 'Life OS test', notes: `Test ${CHANNEL_LABEL[channel]} notification`, channel, repeat: 'none',
+      remind_at: new Date().toISOString(), next_at: new Date().toISOString(), done: false, sent_at: null });
+    toast('Test queued — arrives within ~1 minute'); await refresh();
+  },
+  // ── settings: picklists ──
+  pickList: async (_, name) => { UI.list = name; render(); },
+  plAdd: async name => {
+    const inp = document.getElementById('pl_new'); const v = inp.value.trim(); if (!v) return;
+    const vals = getList(name); if (vals.includes(v)) return toast('Already in the list');
+    await setList(name, [...vals, v]);
+  },
+  plRemove: async (name, i) => { const vals = getList(name).filter((_, j) => j !== i); await setList(name, vals); },
+  plUp: async (name, i) => { if (i < 1) return; const v = [...getList(name)]; [v[i - 1], v[i]] = [v[i], v[i - 1]]; await setList(name, v); },
+  plReset: async name => {
+    if (!confirm(`Reset "${DEFAULT_LISTS[name].label}" to the default values?`)) return;
+    await run(sb.from('picklists').delete().eq('list', name)); toast('Reset to defaults'); await refresh();
+  },
 };
+const UI = { list: 'relationship' };
+async function setList(name, values) {
+  await run(sb.from('picklists').delete().eq('list', name));
+  if (values.length) await run(sb.from('picklists').insert(values.map((value, sort) => ({ list: name, value, sort }))));
+  await refresh();
+}
 
 async function loadK4(vehicleId) {
   await run(sb.from('service_items').insert(KIA_K4_SCHEDULE.map(s => ({ ...s, vehicle_id: vehicleId }))));
@@ -327,6 +405,11 @@ document.addEventListener('click', e => {
   if (a === 'go') { location.hash = id; return; }
   if (a === 'addVehicleK4') { A.addVehicle({ name: 'Kia K4', make: 'Kia', model: 'K4', withK4Schedule: true }); return; }
   A[a]?.(id, n ? Number(n) : undefined);
+});
+// selects that save immediately: <select data-change="action" data-id="…">
+document.addEventListener('change', e => {
+  const el = e.target.closest('[data-change]');
+  if (el) A[el.dataset.change]?.(el.dataset.id, el.value);
 });
 
 // ───────────── screens ─────────────
@@ -355,7 +438,7 @@ function reminderRowHtml(r) {
   const state = r.done ? 'none' : due ? 'due' : new Date(r.next_at) - Date.now() < 86400000 ? 'soon' : 'ok';
   return `<div class="row">
       <div class="grow tap" data-a="editReminder" data-id="${r.id}"><div class="title ${r.done ? 'struck' : ''}">${esc(r.title)}</div>
-        <div class="sub">${esc(fmtDateTime(r.next_at))}${r.repeat !== 'none' ? ` · ${esc(REPEAT_LABEL[r.repeat])}` : ''}</div>
+        <div class="sub">${esc(fmtDateTime(r.next_at))}${r.repeat !== 'none' ? ` · ${esc(REPEAT_LABEL[r.repeat])}` : ''}${r.channel ? ` · 🔔 ${esc(CHANNEL_LABEL[r.channel])}` : ''}</div>
         ${r.notes ? `<div class="sub">${esc(r.notes)}</div>` : ''}</div>
       ${r.done ? chip('none', 'Done') : due
         ? `<button class="ghost small" data-a="snoozeReminder" data-id="${r.id}" data-n="60">+1 h</button><button class="small" data-a="reminderDone" data-id="${r.id}">Done</button>`
@@ -384,7 +467,7 @@ function screenToday() {
         </div>`).join('')}</div>` : '';
   const body = tasksCard + remCard + agendaCard || `<div class="card empty">✅ Nothing due. Enjoy the day.</div>`;
   const d = new Date().toLocaleDateString('en-CA', { weekday: 'short', month: 'short', day: 'numeric' });
-  shell(d, body, 'today', `<button class="ghost small" data-a="signOut">Sign out</button>`);
+  shell(d, body, 'today', `<a class="btn ghost small" href="#settings" aria-label="Settings">⚙️ Settings</a>`);
 }
 
 function screenTasks() {
@@ -483,7 +566,7 @@ function screenPerson(id) {
     </div>
     <div class="card"><h2>Call history (${history.length})</h2>
       ${history.map(c => `<div class="row tap" data-a="editCall" data-id="${c.id}">
-          <div class="grow"><div class="title">${esc(c.call_date)}</div><div class="sub note">${esc(c.summary || '(no notes)')}</div></div></div>`).join('')
+          <div class="grow"><div class="title">${esc(c.call_date)}${c.call_type ? ` · ${esc(c.call_type)}` : ''}</div><div class="sub note">${esc(c.summary || '(no notes)')}</div></div></div>`).join('')
         || '<div class="muted">Nothing yet.</div>'}
     </div>`;
   shell(p.name, body, 'people', `<a class="btn ghost small" href="#people">‹ Back</a>`);
@@ -559,9 +642,38 @@ function screenVehicle(id) {
   shell(v.name, body, 'garage', `<a class="btn ghost small" href="#garage">‹ Back</a>`);
 }
 
+function screenSettings() {
+  const prefRows = MODULES.map(m => {
+    const p = prefFor(S.prefs, m.key);
+    return `<div class="prefrow"><div class="title">${esc(m.label)}</div>
+        <div class="sub">${m.kind === 'timed' ? 'At each reminder’s time (a reminder can override this)' : 'Once a day, only if something is due'}</div>
+      <div class="prefctl"><select class="mini" data-change="setPref" data-id="${m.key}:channel">${Object.entries(CHANNEL_LABEL).map(([k, l]) =>
+        `<option value="${k}" ${p.channel === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      ${m.kind === 'daily' ? `<select class="mini" data-change="setPref" data-id="${m.key}:alert_time" ${p.channel === 'off' ? 'disabled' : ''}>${TIME_OPTIONS.map(([v, l]) =>
+        `<option value="${v}" ${String(p.alert_time || '').slice(0, 5) === v ? 'selected' : ''}>${l}</option>`).join('')}</select>` : ''}
+    </div></div>`;
+  }).join('');
+  const name = UI.list, vals = getList(name), custom = S.picklists.some(p => p.list === name);
+  const body = `
+    <div class="card"><h2>Notifications</h2>${prefRows}
+      <div class="actions"><button class="ghost small" data-a="testAlert" data-id="push">Test push</button>
+        <button class="ghost small" data-a="testAlert" data-id="email">Test email</button></div>
+      <div class="sub" style="margin-top:8px">Push goes to the ntfy app on your phone; email goes to your Gmail. Tests arrive within about a minute.</div></div>
+    <div class="card"><h2>Dropdown lists</h2>
+      <select data-change="pickList">${Object.entries(DEFAULT_LISTS).map(([k, d]) => `<option value="${k}" ${k === name ? 'selected' : ''}>${esc(d.label)}</option>`).join('')}</select>
+      <div class="sub" style="margin:6px 0 4px">Used in: ${esc(DEFAULT_LISTS[name].fields)}${custom ? ' · customised' : ' · default values'}</div>
+      ${vals.map((v, i) => `<div class="row"><div class="grow">${esc(v)}</div>
+        <button class="ghost small" data-a="plUp" data-id="${name}" data-n="${i}" ${i ? '' : 'disabled'} aria-label="Move up">↑</button>
+        <button class="ghost small" data-a="plRemove" data-id="${name}" data-n="${i}" aria-label="Remove">✕</button></div>`).join('')}
+      <div class="row"><input id="pl_new" placeholder="Add a value"><button class="small" data-a="plAdd" data-id="${name}">Add</button></div>
+      ${custom ? `<div class="actions"><button class="ghost small" data-a="plReset" data-id="${name}">Reset to defaults</button></div>` : ''}</div>
+    <div class="card"><h2>Account</h2><div class="actions"><button class="ghost" data-a="signOut">Sign out</button></div></div>`;
+  shell('Settings', body, '', `<a class="btn ghost small" href="#today">‹ Back</a>`);
+}
+
 function render() {
   const [route, id] = (location.hash.slice(1) || 'today').split('/');
-  ({ today: screenToday, tasks: screenTasks, reminders: screenReminders, people: screenPeople, person: () => screenPerson(id),
+  ({ today: screenToday, settings: screenSettings, tasks: screenTasks, reminders: screenReminders, people: screenPeople, person: () => screenPerson(id),
      garage: screenGarage, vehicle: () => screenVehicle(id) }[route] || screenToday)();
 }
 async function refresh() { await loadAll(); render(); }

@@ -94,6 +94,11 @@
       font-weight: 600; font-size: 11px; background: var(--line); color: var(--muted); }
     .dot.ok { background: var(--ok-bg); color: var(--ok); } .dot.soon { background: var(--soon-bg); color: var(--soon); }
     .dot.due { background: var(--due-bg); color: var(--due); }
+    .prefrow { padding: 10px 0; border-top: 1px solid var(--line); } .prefrow:first-of-type { border-top: 0; padding-top: 0; }
+    .prefrow .title { font-weight: 600; } .prefrow .sub { color: var(--muted); font-size: 14px; }
+    .prefctl { display: flex; gap: 8px; margin-top: 8px; }
+    select.mini { flex: 1; padding: 8px; font-size: 14px; }
+    button:disabled { opacity: .4; cursor: default; }
   </style>
 </head>
 <body>

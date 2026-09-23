@@ -1,6 +1,6 @@
 // Minimal service worker: caches the app shell so it opens fast and installs as a home-screen app.
 // Data always comes live from Supabase.
-const CACHE = 'life-os-v2';
+const CACHE = 'life-os-v3';
 const SHELL = ['./', './index.html', './app.js', './logic.js', './config.js', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', e => {
