@@ -83,7 +83,7 @@ export function describeService(st) {
 export function fmtKm(n) { return Number(n || 0).toLocaleString('en-CA'); }
 
 // ── Everything due, in one list (Today screen + email digest) ──
-export function buildAgenda({ people = [], calls = [], vehicles = [], items = [] }, today = todayStr()) {
+export function buildAgenda({ people = [], calls = [], vehicles = [], items = [], tasks = [], taskDone = [], reminders = [] }, today = todayStr()) {
   const out = [];
   for (const p of people) {
     const st = personStatus(p, calls, today);
@@ -120,6 +120,82 @@ export function buildAgenda({ people = [], calls = [], vehicles = [], items = []
         title: `${v.name}: ${label} renewal`, detail: d <= 0 ? `expired ${v[field]}` : `expires in ${d} days` });
     }
   }
+  for (const t of tasks) {
+    if (!taskDueOn(t, today) || isTaskDone(t.id, today, taskDone)) continue;
+    const s = taskStreak(t, taskDone, today);
+    out.push({ kind: 'task', level: 'due', id: t.id, title: t.title,
+      detail: `${describeRepeat(t)}${s ? ` · ${s}-day streak` : ''}` });
+  }
+  for (const r of reminders) {
+    if (r.done || !r.next_at) continue;
+    const day = todayStr(new Date(r.next_at));
+    if (day > today) continue;
+    out.push({ kind: 'reminder', level: day < today ? 'due' : 'soon', id: r.id, title: r.title,
+      detail: day < today ? `was due ${fmtDateTime(r.next_at)}` : `today at ${fmtTime(r.next_at)}` });
+  }
   const rank = { due: 0, soon: 1 };
   return out.sort((a, b) => rank[a.level] - rank[b.level]);
 }
+
+// ── Daily tasks ──
+// repeat_type: 'interval' (every N days, optionally weekdays only) | 'weekdays' (specific days of week)
+// weekdays: array of 0-6 (0 = Sunday)
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const dow = s => parse(s).getDay();
+const isWeekend = s => dow(s) === 0 || dow(s) === 6;
+
+function weekdaysBetween(a, b) {           // count of Mon–Fri days in (a, b]
+  let n = 0;
+  for (let d = a; d < b; ) { d = addDays(d, 1); if (!isWeekend(d)) n++; }
+  return n;
+}
+
+export function taskDueOn(task, date) {
+  if (task.active === false) return false;
+  const start = task.start_date || date;
+  if (date < start) return false;
+  if (task.repeat_type === 'weekdays') return (task.weekdays || []).includes(dow(date));
+  const every = Math.max(1, task.every_n || 1);
+  if (task.skip_weekends) {
+    if (isWeekend(date)) return false;
+    // anchor on the first weekday on/after start
+    let anchor = start; while (isWeekend(anchor)) anchor = addDays(anchor, 1);
+    if (date < anchor) return false;
+    return weekdaysBetween(anchor, date) % every === 0;
+  }
+  return daysBetween(start, date) % every === 0;
+}
+
+export function describeRepeat(t) {
+  if (t.repeat_type === 'weekdays') {
+    const w = [...(t.weekdays || [])].sort();
+    return w.length ? w.map(i => DOW[i]).join(', ') : 'no days picked';
+  }
+  const n = Math.max(1, t.every_n || 1);
+  const base = n === 1 ? 'Every day' : n === 2 ? 'Alternate days' : `Every ${n} days`;
+  return t.skip_weekends ? `${base} (weekdays only)` : base;
+}
+
+export function isTaskDone(taskId, date, taskDone) {
+  return taskDone.some(d => d.task_id === taskId && d.done_date === date);
+}
+
+// consecutive scheduled occurrences completed, counting back from today
+// (today not being done yet doesn't break the streak)
+export function taskStreak(task, taskDone, today = todayStr()) {
+  let streak = 0;
+  for (let i = 0, d = today; i < 400; i++, d = addDays(d, -1)) {
+    if (task.start_date && d < task.start_date) break;
+    if (!taskDueOn(task, d)) continue;
+    if (isTaskDone(task.id, d, taskDone)) streak++;
+    else if (d !== today) break;
+  }
+  return streak;
+}
+
+// ── Reminders ──
+export function fmtTime(ts) { return new Date(ts).toLocaleTimeString('en-CA', { hour: 'numeric', minute: '2-digit' }); }
+export function fmtDateTime(ts) {
+  return new Date(ts).toLocaleString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+export const REPEAT_LABEL = { none: 'One-time', daily: 'Every day', weekly: 'Every week', monthly: 'Every month', yearly: 'Every year' };
